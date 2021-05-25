@@ -1,7 +1,6 @@
 #include "opencv2/core.hpp"
 #include "opencv2/highgui.hpp"
 #include "opencv2/imgcodecs.hpp"
-#include "opencv2/imgproc.hpp"
 #include <bits/stdc++.h>
 #include <chrono>
 #include <cmath>
@@ -11,12 +10,9 @@
 using namespace std;
 
 const long long INF = 1e18;
-
 const int OBJECT_MARKER = 2;
 const int BACKGROUND_MARKER = 1;
-const long double LAMBDA = 10;
-
-const long double NOISE_RATIO = 1;
+const long double NOISE_RATIO = 5;
 
 struct Edge {
   int v, u;
@@ -96,6 +92,8 @@ struct GraphProcessor {
   }
 
   long double flow() {
+    cout << "Calculating max flow..." << endl;
+
     long double maxFlow = 0;
 
     while (true) {
@@ -109,6 +107,7 @@ struct GraphProcessor {
       long double pushed = dfs(source, INF);
 
       while (pushed) {
+        cout << maxFlow << ' ' << pushed << endl;
         maxFlow += pushed;
         pushed = dfs(source, INF);
       }
@@ -164,6 +163,8 @@ struct GraphProcessor {
       }
     }
 
+    cout << "Done!" << endl;
+
     return minCut;
   }
 
@@ -185,98 +186,26 @@ struct GraphProcessor {
 struct ImageMask {
   cv::Mat image;
   vector<vector<int>> maskMatrix;
-  vector<int> objectHistogram;
-  vector<int> backgroundHistogram;
-  int objectMarkerCount = 0;
-  int backgroundMarkerCount = 0;
-
-  int currentEditorMarker = OBJECT_MARKER;
-  bool isDrawing = false;
-
-  ImageMask() {}
 
   ImageMask(cv::Mat image) : image(image) {
-    maskMatrix.resize(image.cols, vector<int>(image.rows));
-    objectHistogram.resize(256, 0);
-    backgroundHistogram.resize(256, 0);
-
-    buildMask();
+    maskMatrix.resize(image.rows, vector<int>(image.cols));
   };
 
-  void placeMarker(int x, int y, int marker) {
-    if (x > image.cols - 1 || y > image.rows - 1 || x < 0 || y < 0) {
-      return;
-    }
-
-    maskMatrix[x][y] = marker;
-
-    cv::Scalar intensity = image.at<uchar>(y, x);
-
-    if (marker == OBJECT_MARKER) {
-      objectHistogram[intensity.val[0]]++;
-      objectMarkerCount++;
-      cout << "Placed object marker at " << '(' << x << ',' << y << ')' << endl;
-    } else {
-      backgroundHistogram[intensity.val[0]]++;
-      backgroundMarkerCount++;
-      cout << "Placed background marker at " << '(' << x << ',' << y << ')'
-           << endl;
-    }
+  void addObjectMarker(int x, int y) { 
+    maskMatrix[x][y] = OBJECT_MARKER; 
   }
 
-  static void handleEditorMouseEvents(int event, int x, int y, int flags,
-                                      void *userdata) {
-    ImageMask *imageMask = static_cast<ImageMask *>(userdata);
-
-    switch (event) {
-    case cv::EVENT_MOUSEMOVE:
-      if (imageMask->isDrawing) {
-        imageMask->placeMarker(x, y, imageMask->currentEditorMarker);
-      }
-      break;
-    case cv::EVENT_LBUTTONDOWN:
-      imageMask->isDrawing = true;
-      imageMask->placeMarker(x, y, imageMask->currentEditorMarker);
-      break;
-    case cv::EVENT_LBUTTONUP:
-      imageMask->isDrawing = false;
-      break;
-    default:
-      break;
-      cv::imshow("Marker Selector", imageMask->image);
-    }
+  void addBackgroundMarker(int x, int y) {
+    maskMatrix[x][y] = BACKGROUND_MARKER;
   }
 
   void buildMask() {
-    cv::namedWindow("Marker Selector", cv::WINDOW_AUTOSIZE);
     cv::imshow("Marker Selector", image);
-    cv::setMouseCallback("Marker Selector", handleEditorMouseEvents, this);
-
-    while (true) {
-      int key = cv::waitKey();
-
-      switch (key) {
-      case 111:
-        currentEditorMarker = OBJECT_MARKER;
-        cout << "Using object marker" << endl;
-        break;
-      case 98:
-        currentEditorMarker = BACKGROUND_MARKER;
-        cout << "Using background marker" << endl;
-        break;
-      case 113:
-        cv::destroyWindow("Marker Selector");
-        return;
-      default:
-        break;
-      }
-    }
-
-    cv::waitKey(0); // wait infinite time for a keypress
   }
 };
 
 struct ImageProcessor {
+  string imagePath;
   cv::Mat image;
   GraphProcessor graph;
   ImageMask imageMask;
@@ -291,47 +220,37 @@ struct ImageProcessor {
            distance;
   }
 
-  long double getHistogramEdgeCapacity(cv::Point target, bool isSource) {
-    int targetMarker = imageMask.maskMatrix[target.x][target.y];
-    cv::Scalar intensity = image.at<uchar>(target);
-
-    long double cap = 0;
-
-    if (isSource) {
-      long double bgProbability =
-          imageMask.backgroundHistogram[intensity.val[0]] /
-          double(imageMask.backgroundMarkerCount);
-      cap = bgProbability == 0 ? 0 : LAMBDA * -1 * log(bgProbability);
-    } else {
-      long double objProbability = imageMask.objectHistogram[intensity.val[0]] /
-                                   double(imageMask.objectMarkerCount);
-      cap = objProbability == 0 ? 0 : LAMBDA * -1 * log(objProbability);
-    }
-
-    return cap;
-  }
-
   int getPixelIndex(int x, int y) { return (y)*image.cols + x; }
 
   cv::Point getPixelPosition(int index) {
     return cv::Point(index % image.cols, index / image.cols);
   }
 
-  GraphProcessor initGraph() {
-    int imageSize = image.rows * image.cols + 2;
+  ImageProcessor(string imagePath) : imagePath(imagePath) {
+    image = cv::imread(imagePath, cv::IMREAD_GRAYSCALE);
 
+    if (image.empty()) {
+      throw runtime_error(
+          "Could not load image. Please check if the image path is correct.");
+    }
+
+    imageMask = ImageMask(image.rows, image.cols);
+
+    int imageSize = image.rows * image.cols + 2;
     graph = GraphProcessor(imageSize, imageSize - 2, imageSize - 1);
 
-    for (int x = 0; x < image.cols; x++) {
-      for (int y = 0; y < image.rows; y++) {
-        int maskIndex = getPixelIndex(x, y);
-        switch (imageMask.maskMatrix[x][y]) {
+    /* cv::imshow("Seed input", image); */
+    /* int key = cv::waitKey(0); */
+
+    for (int i = 0; i < imageMask.rows; i++) {
+      for (int j = 0; j < imageMask.cols; j++) {
+        int maskIndex = getPixelIndex(i, j);
+        switch (imageMask.maskMatrix[i][j]) {
         case (OBJECT_MARKER):
           graph.addEdge(imageSize - 2, maskIndex, INF);
           break;
         case (BACKGROUND_MARKER):
           graph.addEdge(maskIndex, imageSize - 1, INF);
-          break;
         default:
           break;
         }
@@ -359,13 +278,6 @@ struct ImageProcessor {
       bottomPixelIndex =
           getPixelIndex(bottomPixelPosition.x, bottomPixelPosition.y);
 
-      if (imageMask.maskMatrix[pixelPosition.x][pixelPosition.y] == 0) {
-        graph.addEdge(imageSize - 2, pixelIndex,
-                      getHistogramEdgeCapacity(pixelPosition, false));
-        graph.addEdge(pixelIndex, imageSize - 1,
-                      getHistogramEdgeCapacity(pixelPosition, true));
-      }
-
       if (topPixelPosition.y >= 0) {
         graph.addEdge(pixelIndex, topPixelIndex,
                       getPixelEdgeCapacity(pixelPosition, topPixelPosition));
@@ -386,22 +298,11 @@ struct ImageProcessor {
                       getPixelEdgeCapacity(pixelPosition, rightPixelPosition));
       }
     }
-  }
 
-  ImageProcessor(cv::Mat image) : image(image) {
-    imageMask = ImageMask(image);
+    cout << graph.flow() << endl;
 
-    cout << "Image mask built. Building graph..." << endl;
-
-    initGraph();
-  }
-
-  ImageProcessor(cv::Mat image, GraphProcessor graph)
-      : image(image), graph(graph) {}
-
-  cv::Mat getCutImage() {
-    graph.flow();
     vector<long double> cut = graph.minCut();
+
     cv::Mat cutImage(image.rows, image.cols, cv::IMREAD_GRAYSCALE,
                      cv::Scalar());
     cv::Point cutPixelPosition;
@@ -413,95 +314,42 @@ struct ImageProcessor {
       cutImage.at<uchar>(cutPixelPosition) = 255;
     }
 
-    return cutImage;
-  }
-};
-
-struct MetricCollector {
-  cv::Mat referenceImage;
-  cv::Mat cutImage;
-  double jaccardSimilarityCoefficient = 0;
-  double similarityRatio = 0;
-
-  MetricCollector(cv::Mat cutImage, cv::Mat referenceImage)
-      : cutImage(cutImage), referenceImage(referenceImage) {
-    /* if (cutImage.rows != referenceImage.rows || cutImage.cols !=
-     * referenceImage.cols) { */
-    /*   throw */
-    /* } */
+    imshow("Cut image", cutImage);
+    cv::waitKey(0); // wait infinite time for a keypress
   }
 
-  double getSimilarityRatio() {
-    int correctPixels = 0;
-    int totalPixels = cutImage.cols * cutImage.rows;
+  void buildMask() {}
 
-    cv::Scalar cutIntensity, referenceIntensity;
-    for (int x = 0; x < cutImage.cols; x++) {
-      for (int y = 0; y < cutImage.rows; y++) {
-        cutIntensity = cutImage.at<uchar>(y, x);
-        referenceIntensity = referenceImage.at<uchar>(y, x);
-
-        if (cutIntensity.val[0] == referenceIntensity.val[0]) {
-          correctPixels++;
-        }
-      }
-    }
-
-    double ratio = (correctPixels / double(totalPixels)) * 100;
-
-    return ratio;
-  }
-
-  double getJaccardSimilarityCoefficient() {
-    int cutPixelConjunction = 0;
-    int cutPixelDisjunction = 0;
-
-    cv::Scalar cutIntensity, referenceIntensity;
-    for (int x = 0; x < cutImage.cols; x++) {
-      for (int y = 0; y < cutImage.rows; y++) {
-        cutIntensity = cutImage.at<uchar>(y, x);
-        referenceIntensity = referenceImage.at<uchar>(y, x);
-
-        if (cutIntensity.val[0] == 255 && referenceIntensity.val[0] == 255) {
-          cutPixelConjunction++;
-        }
-
-        if (cutIntensity.val[0] == 255 || referenceIntensity.val[0] == 255) {
-          cutPixelDisjunction++;
-        }
-      }
-    }
-
-    double ratio = (cutPixelConjunction / double(cutPixelDisjunction)) * 100;
-
-    return ratio;
-  }
+  void performMinCut() {}
 };
 
 int main() {
-  cv::Mat image =
-      cv::imread("./tests/new/images/cross-gr.jpg", cv::IMREAD_GRAYSCALE);
-  cv::Mat referenceImage =
-      cv::imread("./tests/new/images-segments/cross.bmp", cv::IMREAD_GRAYSCALE);
+  // test 2
+  /* ImageMask mask = ImageMask(7, 7); */
+  /* mask.addBackgroundMarker(0, 0); */
+  /* mask.addObjectMarker(3, 4); */
 
-  if (image.empty()) {
-    cerr << "Could not load source image. Check the image path." << endl;
-    return 1;
-  }
+  // test 3
+  /* ImageMask mask = ImageMask(33, 29); */
+  /* mask.addBackgroundMarker(0, 0); */
+  /* mask.addObjectMarker(21, 22); */
+  /* mask.addObjectMarker(22, 13); */
 
-  ImageProcessor processor(image);
+  // test 5, test 6
+  ImageMask mask = ImageMask(640, 480);
+  mask.addObjectMarker(121, 291);
+  mask.addObjectMarker(411, 356);
+  mask.addObjectMarker(538, 184);
+  mask.addObjectMarker(48, 233);
+  mask.addObjectMarker(498, 344);
+  mask.addObjectMarker(197, 397);
+  mask.addObjectMarker(394, 350);
+  mask.addObjectMarker(522, 86);
+  mask.addBackgroundMarker(0, 0);
+  mask.addBackgroundMarker(226, 122);
+  mask.addBackgroundMarker(543, 417);
 
-  cv::Mat cutImage = processor.getCutImage();
-  cv::imshow("Cut image", cutImage);
-  cv::waitKey(0);
-
-  if (!referenceImage.empty()) {
-    MetricCollector metricCollector = MetricCollector(cutImage, referenceImage);
-
-    double similarityRatio = metricCollector.getSimilarityRatio();
-    double jaccardSimilarityCoefficient =
-        metricCollector.getJaccardSimilarityCoefficient();
-  }
+  ImageProcessor processor("./tests/images/test_5.jpg", mask);
 
   return 0;
 
