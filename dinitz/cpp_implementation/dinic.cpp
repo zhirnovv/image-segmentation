@@ -386,6 +386,8 @@ struct ImageProcessor {
                       getPixelEdgeCapacity(pixelPosition, rightPixelPosition));
       }
     }
+
+    return graph;
   }
 
   ImageProcessor(cv::Mat image) : image(image) {
@@ -393,7 +395,7 @@ struct ImageProcessor {
 
     cout << "Image mask built. Building graph..." << endl;
 
-    initGraph();
+    graph = initGraph();
   }
 
   ImageProcessor(cv::Mat image, GraphProcessor graph)
@@ -501,6 +503,9 @@ int main() {
     double similarityRatio = metricCollector.getSimilarityRatio();
     double jaccardSimilarityCoefficient =
         metricCollector.getJaccardSimilarityCoefficient();
+
+    cout << "Similarity ratio: " << similarityRatio << endl;
+    cout << "Jaccard similarity coefficient" << jaccardSimilarityCoefficient << endl;
   }
 
   return 0;
