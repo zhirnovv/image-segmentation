@@ -14,16 +14,14 @@ const long long INF = 1e18;
 
 const int OBJECT_MARKER = 2;
 const int BACKGROUND_MARKER = 1;
-const long double LAMBDA = 10;
+const long double LAMBDA = 60.0;
 
-const long double NOISE_RATIO = 1;
+const long double NOISE_RATIO = 100;
 
 struct Edge {
   int v, u;
-  long double edgeCapacity, reverseFlow, flow = 0;
-  Edge(int v, int u, long double cap) : v(v), u(u), edgeCapacity(cap) {
-    reverseFlow = 0;
-  }
+  long double edgeCapacity, flow = 0.0;
+  Edge(int v, int u, long double cap) : v(v), u(u), edgeCapacity(cap) {}
 };
 
 struct GraphProcessor {
@@ -52,6 +50,26 @@ struct GraphProcessor {
     adjacencyList[v].push_back(m);
     adjacencyList[u].push_back(m + 1);
     m += 2;
+  }
+
+  void adjustEdge(int v, int u, long double newCapacity) {
+    for (int id : adjacencyList[v]) {
+      if (edges[id].u == u && edges[id].edgeCapacity != 0) {
+        edges[id].edgeCapacity = newCapacity;
+        residualNetwork[id].edgeCapacity = newCapacity;
+        return;
+      }
+    }
+  }
+
+  Edge getEdge(int v, int u) {
+    for (int id : adjacencyList[v]) {
+      if (edges[id].u == u) {
+        return edges[id];
+      }
+    }
+
+    return Edge(-1, -1, -1);
   }
 
   bool bfs() {
@@ -95,8 +113,12 @@ struct GraphProcessor {
     return 0;
   }
 
-  long double flow() {
-    long double maxFlow = 0;
+  long double flow(long double startingFlow = INF) {
+    for (int i; i < edges.size(); i++) {
+      edges[i].flow = 0.0;
+    }
+
+    long double maxFlow = 0.0;
 
     while (true) {
       fill(level.begin(), level.end(), -1);
@@ -106,11 +128,11 @@ struct GraphProcessor {
         break;
       fill(ptr.begin(), ptr.end(), 0);
 
-      long double pushed = dfs(source, INF);
+      long double pushed = dfs(source, startingFlow);
 
       while (pushed) {
         maxFlow += pushed;
-        pushed = dfs(source, INF);
+        pushed = dfs(source, startingFlow);
       }
     }
 
@@ -137,12 +159,11 @@ struct GraphProcessor {
     vector<long double> minCut;
 
     while (!minCutQueue.empty()) {
+
       int v = minCutQueue.front();
       minCutQueue.pop();
 
       minCut.push_back(v);
-
-      vector<Edge> adjacentEdges;
 
       int to;
       long double flow;
@@ -164,10 +185,16 @@ struct GraphProcessor {
       }
     }
 
+    cout << "Min cut size" << minCut.size() << endl;
+
     return minCut;
   }
 
   vector<long double> minCut() {
+    for (int i = 0; i < residualNetwork.size(); i++) {
+      residualNetwork[i].flow = 0.0;
+    }
+
     buildResidualNetwork();
 
     vector<Edge> viableEdges;
@@ -175,6 +202,8 @@ struct GraphProcessor {
     copy_if(residualNetwork.begin(), residualNetwork.end(),
             back_inserter(viableEdges),
             [](Edge potentialEdge) { return potentialEdge.flow > 0; });
+
+    minCutQueue = queue<int>();
 
     minCutQueue.push(source);
 
@@ -215,12 +244,9 @@ struct ImageMask {
     if (marker == OBJECT_MARKER) {
       objectHistogram[intensity.val[0]]++;
       objectMarkerCount++;
-      cout << "Placed object marker at " << '(' << x << ',' << y << ')' << endl;
     } else {
       backgroundHistogram[intensity.val[0]]++;
       backgroundMarkerCount++;
-      cout << "Placed background marker at " << '(' << x << ',' << y << ')'
-           << endl;
     }
   }
 
@@ -278,37 +304,50 @@ struct ImageMask {
 
 struct ImageProcessor {
   cv::Mat image;
+  int imageSize;
   GraphProcessor graph;
+  long double previousMaxFlow = 0.0;
   ImageMask imageMask;
+  unordered_map<int, long double> tLinkCapacity;
 
   long double getPixelEdgeCapacity(cv::Point start, cv::Point end) {
     double distance = cv::norm(cv::Mat(start), cv::Mat(end));
     cv::Scalar startIntensity = image.at<uchar>(start);
     cv::Scalar endIntensity = image.at<uchar>(end);
 
-    return exp(-1 * pow(startIntensity.val[0] - endIntensity.val[0], 2) /
-               (2 * pow(NOISE_RATIO, 2))) /
-           distance;
+    long double cap = (exp(-1 * pow(startIntensity.val[0] - endIntensity.val[0], 2) /
+          (2 * pow(NOISE_RATIO, 2))) /
+        distance);
+
+    return round(cap * 1e10) / 1e10;
   }
 
   long double getHistogramEdgeCapacity(cv::Point target, bool isSource) {
     int targetMarker = imageMask.maskMatrix[target.x][target.y];
     cv::Scalar intensity = image.at<uchar>(target);
 
-    long double cap = 0;
+    long double cap = 0.0;
 
-    if (isSource) {
-      long double bgProbability =
-          imageMask.backgroundHistogram[intensity.val[0]] /
-          double(imageMask.backgroundMarkerCount);
-      cap = bgProbability == 0 ? 0 : LAMBDA * -1 * log(bgProbability);
+    long double bgProbability =
+        imageMask.backgroundHistogram[intensity.val[0]] /
+        double(imageMask.backgroundMarkerCount);
+
+    long double objProbability = imageMask.objectHistogram[intensity.val[0]] /
+                                 double(imageMask.objectMarkerCount);
+
+    long double totalProbability = bgProbability + objProbability;
+
+    if (!isSource) {
+      cap = bgProbability == 0
+                ? 0
+                : LAMBDA * -1 * log(bgProbability / totalProbability);
     } else {
-      long double objProbability = imageMask.objectHistogram[intensity.val[0]] /
-                                   double(imageMask.objectMarkerCount);
-      cap = objProbability == 0 ? 0 : LAMBDA * -1 * log(objProbability);
+      cap = objProbability == 0
+                ? 0
+                : LAMBDA * -1 * log(objProbability / totalProbability);
     }
 
-    return cap;
+    return round(cap * 1e10) / 1e10;
   }
 
   int getPixelIndex(int x, int y) { return (y)*image.cols + x; }
@@ -318,8 +357,6 @@ struct ImageProcessor {
   }
 
   GraphProcessor initGraph() {
-    int imageSize = image.rows * image.cols + 2;
-
     graph = GraphProcessor(imageSize, imageSize - 2, imageSize - 1);
 
     for (int x = 0; x < image.cols; x++) {
@@ -360,10 +397,15 @@ struct ImageProcessor {
           getPixelIndex(bottomPixelPosition.x, bottomPixelPosition.y);
 
       if (imageMask.maskMatrix[pixelPosition.x][pixelPosition.y] == 0) {
-        graph.addEdge(imageSize - 2, pixelIndex,
-                      getHistogramEdgeCapacity(pixelPosition, false));
-        graph.addEdge(pixelIndex, imageSize - 1,
-                      getHistogramEdgeCapacity(pixelPosition, true));
+        long double fromSourceCapacity =
+            getHistogramEdgeCapacity(pixelPosition, false);
+        long double toSinkCapacity =
+            getHistogramEdgeCapacity(pixelPosition, true);
+
+        tLinkCapacity[pixelIndex] = fromSourceCapacity + toSinkCapacity;
+
+        graph.addEdge(imageSize - 2, pixelIndex, fromSourceCapacity);
+        graph.addEdge(pixelIndex, imageSize - 1, toSinkCapacity);
       }
 
       if (topPixelPosition.y >= 0) {
@@ -390,24 +432,107 @@ struct ImageProcessor {
     return graph;
   }
 
+  void adjustGraphWeights() {
+    for (int x = 0; x < image.cols; x++) {
+      for (int y = 0; y < image.rows; y++) {
+        int maskIndex = getPixelIndex(x, y);
+        cv::Point pixelPosition = cv::Point(x, y);
+
+        long double fromSourceCapacity;
+        long double toSinkCapacity;
+
+        if (tLinkCapacity.find(maskIndex) == tLinkCapacity.end()) {
+          continue;
+        }
+
+        long double pixelTLinkCapacity = tLinkCapacity[maskIndex];
+
+        switch (imageMask.maskMatrix[x][y]) {
+        case (OBJECT_MARKER):
+          fromSourceCapacity = INF;
+          toSinkCapacity = pixelTLinkCapacity;
+
+          graph.adjustEdge(imageSize - 2, maskIndex, fromSourceCapacity);
+          graph.adjustEdge(maskIndex, imageSize - 1, toSinkCapacity);
+
+          tLinkCapacity.erase(maskIndex);
+
+          break;
+        case (BACKGROUND_MARKER):
+          fromSourceCapacity = pixelTLinkCapacity;
+          toSinkCapacity = INF;
+
+          graph.adjustEdge(imageSize - 2, maskIndex, fromSourceCapacity);
+          graph.adjustEdge(maskIndex, imageSize - 1, toSinkCapacity);
+
+          tLinkCapacity.erase(maskIndex);
+
+          break;
+        default:
+          /* int pixelIndex = getPixelIndex(x, y); */
+          /* cout << pixelIndex << ' ' << "not a marker" << endl; */
+          /* long double fromSourceCapacity = */
+          /*     getHistogramEdgeCapacity(pixelPosition, false); */
+          /* long double toSinkCapacity = */
+          /*     getHistogramEdgeCapacity(pixelPosition, true); */
+
+          /* tLinkCapacity[pixelIndex] = */
+          /*     fromSourceCapacity + toSinkCapacity; */
+
+          /* graph.adjustEdge(imageSize - 2, pixelIndex, */
+          /*                  fromSourceCapacity); */
+          /* graph.adjustEdge(pixelIndex, imageSize - 1, toSinkCapacity); */
+          break;
+        }
+      }
+    }
+  }
+
   ImageProcessor(cv::Mat image) : image(image) {
+    imageSize = image.cols * image.rows + 2;
     imageMask = ImageMask(image);
 
     cout << "Image mask built. Building graph..." << endl;
 
+    cout << imageMask.backgroundMarkerCount << ' '
+         << imageMask.objectMarkerCount << ' ' << imageMask.backgroundMarkerCount + imageMask.objectMarkerCount << endl;
+
     graph = initGraph();
+
+    previousMaxFlow = graph.flow();
+
+    cout << "Max flow: " << previousMaxFlow << endl;
   }
 
-  ImageProcessor(cv::Mat image, GraphProcessor graph)
-      : image(image), graph(graph) {}
+  ImageProcessor(cv::Mat image, GraphProcessor graph, ImageMask mask,
+                 unordered_map<int, long double> tLinkCapacity,
+                 long double previousMaxFlow)
+      : image(image), graph(graph), imageMask(mask),
+        tLinkCapacity(tLinkCapacity), previousMaxFlow(previousMaxFlow) {
+    imageSize = image.cols * image.rows + 2;
+
+    imageMask.image = image;
+    imageMask.buildMask();
+
+    cout << imageMask.backgroundMarkerCount << ' '
+         << imageMask.objectMarkerCount << ' ' << imageMask.backgroundMarkerCount + imageMask.objectMarkerCount << endl;
+
+    cout << "Image mask built. Adjusting graph weights..." << endl;
+
+    /* adjustGraphWeights(); */
+    graph = initGraph();
+
+    previousMaxFlow = graph.flow();
+
+    cout << "Max flow: " << previousMaxFlow << endl;
+  }
 
   cv::Mat getCutImage() {
-    graph.flow();
     vector<long double> cut = graph.minCut();
+
     cv::Mat cutImage(image.rows, image.cols, cv::IMREAD_GRAYSCALE,
                      cv::Scalar());
     cv::Point cutPixelPosition;
-    cv::Scalar intensity;
 
     // ignore source
     for (int i = 1; i < cut.size(); i++) {
@@ -422,16 +547,11 @@ struct ImageProcessor {
 struct MetricCollector {
   cv::Mat referenceImage;
   cv::Mat cutImage;
-  double jaccardSimilarityCoefficient = 0;
-  double similarityRatio = 0;
+  double jaccardSimilarityCoefficient = 0.0;
+  double similarityRatio = 0.0;
 
   MetricCollector(cv::Mat cutImage, cv::Mat referenceImage)
-      : cutImage(cutImage), referenceImage(referenceImage) {
-    /* if (cutImage.rows != referenceImage.rows || cutImage.cols !=
-     * referenceImage.cols) { */
-    /*   throw */
-    /* } */
-  }
+      : cutImage(cutImage), referenceImage(referenceImage) {}
 
   double getSimilarityRatio() {
     int correctPixels = 0;
@@ -480,11 +600,12 @@ struct MetricCollector {
   }
 };
 
-int main() {
+int main(int argc, char *argv[]) {
+  cout << string(argv[3]) << endl;
   cv::Mat image =
-      cv::imread("./tests/new/images/cross-gr.jpg", cv::IMREAD_GRAYSCALE);
-  cv::Mat referenceImage =
-      cv::imread("./tests/new/images-segments/cross.bmp", cv::IMREAD_GRAYSCALE);
+      cv::imread(string(argv[1]), cv::IMREAD_GRAYSCALE);
+  cv::Mat referenceImage = cv::imread(string(argv[2]),
+                                      cv::IMREAD_GRAYSCALE);
 
   if (image.empty()) {
     cerr << "Could not load source image. Check the image path." << endl;
@@ -494,19 +615,48 @@ int main() {
   ImageProcessor processor(image);
 
   cv::Mat cutImage = processor.getCutImage();
+
   cv::imshow("Cut image", cutImage);
   cv::waitKey(0);
+  cv::destroyWindow("Cut image");
 
-  if (!referenceImage.empty()) {
-    MetricCollector metricCollector = MetricCollector(cutImage, referenceImage);
+  cv::imwrite(string(argv[3]) + "-first.png", cutImage);
 
-    double similarityRatio = metricCollector.getSimilarityRatio();
-    double jaccardSimilarityCoefficient =
-        metricCollector.getJaccardSimilarityCoefficient();
+  /* if (!referenceImage.empty()) { */
+  MetricCollector metricCollector = MetricCollector(cutImage, referenceImage);
 
-    cout << "Similarity ratio: " << similarityRatio << endl;
-    cout << "Jaccard similarity coefficient" << jaccardSimilarityCoefficient << endl;
-  }
+  double similarityRatio = metricCollector.getSimilarityRatio();
+  double jaccardSimilarityCoefficient =
+      metricCollector.getJaccardSimilarityCoefficient();
+
+  cout << "Similarity ratio: " << similarityRatio << endl;
+  cout << "Jaccard similarity coefficient: " << jaccardSimilarityCoefficient
+       << endl;
+
+  /* if (jaccardSimilarityCoefficient < double(75)) { */
+  ImageProcessor consequentProcessor(
+      cutImage, processor.graph, processor.imageMask, processor.tLinkCapacity,
+      processor.previousMaxFlow);
+
+  cv::Mat newCutImage = consequentProcessor.getCutImage();
+
+  cv::imshow("New cut image", newCutImage);
+  cv::waitKey(0);
+  cv::destroyWindow("New cut image");
+
+  cv::imwrite(string(argv[3]) + "-second.png", newCutImage);
+
+  MetricCollector consequentMetricCollector(newCutImage, referenceImage);
+
+  similarityRatio = consequentMetricCollector.getSimilarityRatio();
+  jaccardSimilarityCoefficient =
+      consequentMetricCollector.getJaccardSimilarityCoefficient();
+
+  cout << "Similarity ratio: " << similarityRatio << endl;
+  cout << "Jaccard similarity coefficient: " << jaccardSimilarityCoefficient
+       << endl;
+  /* } */
+  /* } */
 
   return 0;
 
