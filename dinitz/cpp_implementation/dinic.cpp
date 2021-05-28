@@ -16,7 +16,7 @@ const int OBJECT_MARKER = 2;
 const int BACKGROUND_MARKER = 1;
 const long double LAMBDA = 60.0;
 
-const long double NOISE_RATIO = 100;
+const long double NOISE_RATIO = 0.7;
 
 struct Edge {
   int v, u;
